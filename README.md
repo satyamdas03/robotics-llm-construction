@@ -200,20 +200,12 @@ What was done in this iteration:
     - steps_executed: 10
     - rollouts_run: 0 (the current LLM produced identical samples at T=0.8)
 
-## Git status note
+## GitHub repository
 
-There is no dedicated GitHub remote for this robotics subdirectory yet. The
-only configured `origin` is `alpaca-trading-agent`, which is a different project.
-If you want this on GitHub, create a new repository (e.g.,
-`satyamdas03/robotics-llm-construction`) and run:
+Dedicated repo: **https://github.com/satyamdas03/robotics-llm-construction**
 
 ```bash
-cd C:/Users/point/projects/robotics
-git init
-git add .
-git commit -m "Initial commit: uncertainty-aware physics-coupled LLM planner"
-git remote add origin https://github.com/satyamdas03/YOUR_NEW_REPO.git
-git push -u origin main
+git clone https://github.com/satyamdas03/robotics-llm-construction.git
 ```
 
 ## Next steps / experiments
