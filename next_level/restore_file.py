@@ -1,0 +1,251 @@
+# Script to restore corrupted world_building_construction.py file
+
+with open('world_building_construction.py', 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+
+# Keep lines up to and including get_current_pos (line 1-251)
+correct_lines = lines[:251]
+
+# Add the corrected robot skills functions
+skills = '''
+def get_distance(objA_id, objB_id):
+    posA = get_current_pos(objA_id)
+    posB = get_current_pos(objB_id)
+    return math.sqrt((posA[0] - posB[0])**2 + (posA[1] - posB[1])**2)
+
+def get_camera_image_and_find(robot_name, target_name):
+    if target_name not in COLOR_RANGES:
+        print(f"[{robot_name}] Error: No color definition for {target_name}")
+        return False, None
+
+    robot_id = ROBOT_STATE[robot_name]["id"] 
+    pos, orn = p.getBasePositionAndOrientation(robot_id)
+    
+    rot_matrix = p.getMatrixFromQuaternion(orn)
+    rot_matrix = np.array(rot_matrix).reshape(3, 3)
+    
+    camera_offset = [0.2, 0, 0.3] 
+    target_offset = [1.5, 0, 0.0] 
+    
+    camera_pos = pos + rot_matrix.dot(camera_offset) 
+    target_pos = pos + rot_matrix.dot(target_offset)
+
+    view_matrix = p.computeViewMatrix(camera_pos, target_pos, [0, 0, 1])
+    projection_matrix = p.computeProjectionMatrixFOV(
+        fov=90.0,
+        aspect=float(CAM_IMG_WIDTH) / CAM_IMG_HEIGHT,
+        nearVal=0.1,
+        farVal=100.0
+    )
+    
+    (_, _, rgbImg, _, _) = p.getCameraImage(
+        width=CAM_IMG_WIDTH,
+        height=CAM_IMG_HEIGHT,
+        viewMatrix=view_matrix,
+        projectionMatrix=projection_matrix,
+        renderer=p.ER_BULLET_HARDWARE_OPENGL 
+    )
+    
+    rgbImg = np.array(rgbImg, dtype=np.uint8)
+    
+    if len(rgbImg.shape) == 1:
+        rgbImg = rgbImg.reshape((CAM_IMG_HEIGHT, CAM_IMG_WIDTH, 4))
+        
+    try:
+        img_bgr = cv2.cvtColor(rgbImg, cv2.COLOR_RGBA2BGR)
+        img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        colors = COLOR_RANGES[target_name]
+        
+        mask1 = cv2.inRange(img_hsv, colors['lower1'], colors['upper1'])
+        
+        if colors['lower2'] is not None:
+            mask2 = cv2.inRange(img_hsv, colors['lower2'], colors['upper2'])
+            mask = mask1 | mask2
+        else:
+            mask = mask1
+            
+        if np.sum(mask) > 50: 
+            return True, mask 
+        else:
+            return False, None
+    except Exception as e:
+        print(f"[{robot_name}] Error processing camera image: {e}")
+        return False, None
+
+def find_object(robot_name, target_name):
+    print(f"[{robot_name}] SKILL: Finding '{target_name}'...")
+    
+    if ROBOT_STATE[robot_name]["held_object_name"] == target_name:
+        print(f"[{robot_name}] Already holding {target_name}.")
+        return True
+    
+    target_id = WORLD_KNOWLEDGE[target_name]["id"]
+    robot_id = ROBOT_STATE[robot_name]["id"]
+    
+    distance = get_distance(robot_id, target_id)
+    if distance < 0.5:
+        print(f"[{robot_name}] Object {target_name} is already at my feet.")
+        return True
+    
+    for i in range(20):
+        found, _ = get_camera_image_and_find(robot_name, target_name) 
+        if found:
+            print(f"[{robot_name}] Found {target_name}!")
+            return True
+            
+        current_pos, current_orn = p.getBasePositionAndOrientation(robot_id)
+        yaw = p.getEulerFromQuaternion(current_orn)[2]
+        next_yaw = yaw + (math.pi * 2 / 20)
+        next_orn = p.getQuaternionFromEuler([0, 0, next_yaw])
+        
+        p.resetBasePositionAndOrientation(robot_id, current_pos, next_orn)
+        
+        for _ in range(10):
+            p.stepSimulation()
+            time.sleep(0.01)
+            
+    print(f"[{robot_name}] Could not find {target_name} after spinning 360 degrees.")
+    return False
+
+def _navigate_to_coords(robot_name, target_pos, threshold=0.4):
+    robot_id = ROBOT_STATE[robot_name]["id"]
+    
+    for _ in range(2000):
+        current_pos, _ = p.getBasePositionAndOrientation(robot_id)
+        
+        dir_x = target_pos[0] - current_pos[0]
+        dir_y = target_pos[1] - current_pos[1]
+        distance = math.sqrt(dir_x**2 + dir_y**2)
+        
+        if distance < threshold:
+            p.resetBaseVelocity(robot_id, [0, 0, 0]) 
+            return True 
+        
+        speed = min(2.0, max(0.2, distance * 2.0))
+        
+        norm_x = dir_x / distance
+        norm_y = dir_y / distance
+        linear_velocity = [norm_x * speed, norm_y * speed, 0]
+        target_yaw = math.atan2(dir_y, dir_x)
+        target_orn = p.getQuaternionFromEuler([0, 0, target_yaw])
+        
+        p.resetBasePositionAndOrientation(robot_id, current_pos, target_orn)
+        p.resetBaseVelocity(robot_id, linear_velocity, [0, 0, 0])
+        
+        p.stepSimulation()
+        time.sleep(0.01)
+        
+    p.resetBaseVelocity(robot_id, [0, 0, 0]) 
+    print(f"[{robot_name}] Navigation timed out.")
+    return False
+
+def move_to(robot_name, target_name):
+    print(f"[{robot_name}] SKILL: Navigating to '{target_name}'...")
+    if target_name not in WORLD_KNOWLEDGE:
+        print(f"[{robot_name}] Error: Unknown target '{target_name}'")
+        return False
+    
+    target_info = WORLD_KNOWLEDGE[target_name]
+    
+    if target_info["type"] == "location":
+        print(f"[{robot_name}] {target_name} is a location. Moving to known coordinates.")
+        if _navigate_to_coords(robot_name, target_info["pos"]):
+            print(f"[{robot_name}] Arrived at {target_name}.")
+            return True
+        return False
+            
+    elif target_info["type"] == "object":
+        print(f"[{robot_name}] {target_name} is an object. Trying to find it...")
+        if find_object(robot_name, target_name):
+            if ROBOT_STATE[robot_name]["held_object_name"] == target_name:
+                print(f"[{robot_name}] Already holding {target_name}, no need to move.")
+                return True
+                
+            target_id = target_info["id"]
+            target_pos_tuple, _ = p.getBasePositionAndOrientation(target_id)
+            print(f"[{robot_name}] Object {target_name} located. Moving to its position.")
+            if _navigate_to_coords(robot_name, target_pos_tuple):
+                print(f"[{robot_name}] Arrived at {target_name}.")
+                return True
+        else:
+            print(f"[{robot_name}] Failed to move to {target_name} (could not find it).")
+            return False
+    return False
+
+def pickup(robot_name, object_name):
+    print(f"[{robot_name}] SKILL: Attempting to pick up '{object_name}'...")
+    if object_name not in WORLD_KNOWLEDGE:
+        print(f"[{robot_name}] Error: Unknown object '{object_name}'")
+        return False
+    if WORLD_KNOWLEDGE[object_name]["type"] != "object":
+        print(f"[{robot_name}] Error: Cannot 'pickup' a location: {object_name}")
+        return False
+        
+    if ROBOT_STATE[robot_name]["current_constraint"] is not None:
+        print(f"[{robot_name}] Robot is already holding an object ({ROBOT_STATE[robot_name]['held_object_name']}).")
+        return False
+
+    robot_id = ROBOT_STATE[robot_name]["id"]
+    object_id = WORLD_KNOWLEDGE[object_name]["id"]
+    
+    pickup_distance = 0.45 
+    
+    distance = get_distance(robot_id, object_id)
+    if distance > pickup_distance:
+        print(f"[{robot_name}] Error: '{object_name}' is too far away ({distance:.2f} units). Moving to it first...")
+        if not move_to(robot_name, object_name):
+            return False
+    
+    distance = get_distance(robot_id, object_id)
+    if distance > pickup_distance:
+        print(f"[{robot_name}] Failed to get close enough to {object_name} (distance: {distance:.2f}). Pickup failed.")
+        return False
+
+    constraint_id = p.createConstraint(
+        parentBodyUniqueId=robot_id,
+        parentLinkIndex=-1, 
+        childBodyUniqueId=object_id,
+        childLinkIndex=-1,
+        jointType=p.JOINT_FIXED,
+        jointAxis=[0, 0, 0],
+        parentFramePosition=[0.5, 0, 0.6],
+        childFramePosition=[0, 0, 0]
+    )
+    ROBOT_STATE[robot_name]["current_constraint"] = constraint_id
+    ROBOT_STATE[robot_name]["held_object_name"] = object_name 
+    print(f"[{robot_name}] Picked up {object_name} (holding in front).")
+    
+    for _ in range(50):
+        p.stepSimulation()
+        time.sleep(0.01)
+    return True
+
+'''
+
+correct_lines.append(skills)
+
+# Find where the drop function starts in the corrupted version
+drop_found = False
+for i in range(251, min(400, len(lines))):
+    if 'def drop(robot_name, location_name):' in lines[i]:
+        correct_lines.extend(lines[i:])
+        drop_found = True
+        break
+    elif 'Dropping object right here' in lines[i] and not drop_found:
+        # Found the body but not the header
+        correct_lines.append('def drop(robot_name, location_name):\n')
+        correct_lines.append('    if location_name is None or str(location_name).lower() == "none":\n')
+        correct_lines.extend(lines[i:])
+        drop_found = True
+        break
+
+if not drop_found:
+    print("ERROR: Could not locate drop function")
+    import sys
+    sys.exit(1)
+
+# Write the restored file
+with open('world_building_construction.py', 'w', encoding='utf-8') as f:
+    f.writelines(correct_lines)
+
+print(f"File restored successfully!  Total lines: {len(correct_lines)}")
